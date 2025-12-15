@@ -40,4 +40,3 @@ $$P^* = \text{Cost} \times \left( \frac{\beta}{1 + \beta} \right)$$
 * **Techniques:** Maximum Likelihood Estimation, Matrix Algebra, Econometric Modeling.
 
 ---
-*Created by Abdullah Shahzad.*
