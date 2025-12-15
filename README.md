@@ -1,26 +1,43 @@
-# Dynamic Pricing Engine: A 'From Scratch' Implementation 🍊
+# Dynamic Pricing Engine: Algorithmic Revenue Optimization
 ### [➡️ Read the Full Report](https://abdullahshahzadkhan.github.io/Dynamic-Pricing-MLE/)
 
 ## 📌 Project Overview
-This project bridges the gap between theoretical economics and applied data science. Using scanner data from **Dominick’s Finer Foods**, I built a dynamic pricing algorithm to optimize the revenue of Tropicana Premium Orange Juice.
+This project implements a **dynamic pricing engine** to optimize retail revenue, using scanner data from the Dominick’s Finer Foods dataset.
 
-Unlike standard analyses that rely on "black-box" linear regression packages (`lm` or `glm`), this project builds the statistical engine from the ground up. I manually implemented **Maximum Likelihood Estimation (MLE)** to derive demand parameters and used calculus to solve for the mathematically optimal price point.
+The core objective was to move beyond standard regression packages (`lm`) to build a transparent, white-box statistical model. By manually implementing **Maximum Likelihood Estimation (MLE)** and **Numerical Optimization**, this project derives precise demand elasticities and calculates mathematically optimal price points to maximize store-level profitability.
 
-## 🎯 The Business Problem
-* **Objective:** Determine the optimal price for Tropicana 64oz to maximize weekly store-level profit.
-* **The "Trap":** A simple analysis suggested the product was performing well.
-* **The Reality:** My model revealed the product was **underpriced by ~40%**, sacrificing significant margin for volume.
-* **The Solution:** A corrected pricing strategy projected to **increase weekly profits by 81%**.
+## 💼 The Business Case
+* **Context:** Retail CPG products often face "Omitted Variable Bias" where competitor pricing disguises true customer price sensitivity.
+* **Problem:** Initial analysis suggested the product was performing optimally.
+* **Diagnosis:** After controlling for competitive dynamics, the model revealed the product was **underpriced by ~40%**.
+* **Outcome:** The algorithm proposes a corrected pricing strategy projected to **increase weekly profits by 81%** by capturing margin expansion.
 
-## 🚀 "Hard Mode" Methodology
-This project demonstrates proficiency in statistical programming and mathematical derivation:
+## ⚙️ Technical Methodology
 
-### 1. Manual Maximum Likelihood Estimation (MLE)
-Instead of using pre-built libraries, I wrote a custom **Negative Log-Likelihood function** for the Gaussian demand curve and optimized it using the **L-BFGS-B** algorithm.
-```r
-# Snippet of the custom engine
-nll_gaussian_multi <- function(theta, y, log_prices, log_price_comp) {
-  y_hat <- theta[1] + theta[2]*log_prices + theta[3]*log_price_comp
-  sum_prob_y <- sum(dnorm(y, log = TRUE, mean = y_hat, sd = theta[4]))
-  return(-sum_prob_y)
-}
+### 1. Custom Likelihood Estimation
+To ensure full control over the statistical assumptions, a custom **Negative Log-Likelihood** function was developed for the demand curve. This allows for flexible extension to non-normal distributions (e.g., Poisson for count data) in future iterations.
+* **Optimization:** Parameters were estimated using the **L-BFGS-B** algorithm via R's `optim()` function.
+
+### 2. Statistical Inference
+Standard errors were not taken from a package but derived from first principles. The **Fisher Information Matrix** (inverse Hessian) was calculated using the `numDeriv` library to ensure coefficient estimates were statistically significant.
+
+### 3. Price Optimization (Calculus)
+The optimal price point ($P^*$) was derived analytically by solving the first-order condition of the profit function:
+
+$$P^* = \text{Cost} \times \left( \frac{\beta}{1 + \beta} \right)$$
+
+## 📊 Impact Analysis
+
+| Metric | Current Status | Optimized Model | Change |
+| :--- | :--- | :--- | :--- |
+| **Unit Price** | $0.045 / oz | $0.062 / oz | **+40%** |
+| **Sales Volume** | 8,632 units | 3,476 units | **-60%** |
+| **Weekly Profit** | $41.88 | $75.94 | **+81.3%** |
+
+## 🛠️ Technologies
+* **Language:** R
+* **Core Libraries:** `bayesm`, `numDeriv`, `optim`, `dplyr`
+* **Techniques:** Maximum Likelihood Estimation, Matrix Algebra, Econometric Modeling.
+
+---
+*Created by Abdullah Shahzad.*
