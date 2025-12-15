@@ -1,0 +1,299 @@
+---
+title: "Dynamic Pricing Engine: A 'From Scratch' Implementation"
+author: "Abdullah Shahzad"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    highlight: tango
+    number_sections: false
+    pandoc_args: ["--output=index.html"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(bayesm)
+library(dplyr)
+library(ggplot2)
+library(numDeriv)
+```
+
+# Executive Summary
+
+**Objective:** Build a white-box Dynamic Pricing engine to optimize revenue for Tropicana Orange Juice using the Dominick's Finer Foods dataset.
+
+**Methodology:**
+
+- Manual MLE: Implemented Maximum Likelihood Estimation from scratch (bypassing lm) to estimate demand parameters.
+- Multivariate Analysis: Controlled for competitor pricing (Minute Maid) to correct for Omitted Variable Bias.
+- Revenue Optimization: Derived the optimal price point (P∗) using Calculus and the Optimal Markup Rule.
+
+**Key Findings:**
+
+- Price Elasticity: Corrected Own-Price Elasticity is -2.83 (High Sensitivity).
+- Competitor Impact: Cross-Price Elasticity with Minute Maid is +0.49 (Strong Substitute).
+- Recommendation: The product is currently underpriced. Increasing price to $0.062/oz is projected to increase weekly store profit by ~81%.
+
+# Data Preparation
+
+We filter the dataset for Tropicana Premium 64oz (Brand 1) and create log-transformed variables for elasticity modeling.
+
+```{r data_prep}
+# Load Data from bayesm package
+data(orangeJuice)
+oj_data <- orangeJuice$yx
+
+# Filter for Brand 1 (Tropicana)
+tropicana <- oj_data %>% 
+  filter(brand == 1) %>% 
+  mutate(log_price = log(price1),        # Own Price
+         log_price_mm = log(price5))     # Competitor Price (Minute Maid)
+
+# Quick Peek
+head(tropicana %>% select(week, logmove, price1, price5, log_price, log_price_mm))
+```
+
+# Visualization (Univariate)
+
+We visualize the demand curve. The downward slope confirms the "Law of Demand."
+
+```{r eda}
+ggplot(tropicana, aes(x = log_price, y = logmove)) +
+  geom_point(alpha = 0.3, color = "darkorange") +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = "Tropicana Demand Curve", x = "Log Price", y = "Log Quantity") +
+  theme_minimal()
+```
+
+# Phase 1: The Univariate Engine
+
+We start with a baseline model assuming demand depends only on our own price:
+$$ln(Q)=β0​+β1​ln(P)+ϵ$$
+
+## A. Manual Log-Likelihood Function
+
+We define the function to calculate the probability of the data given parameters θ=[Intercept,Elasticity,σ].
+
+```{r manual_mle}
+# Univariate Negative Log-Likelihood Function
+nll_gaussian_simple <- function(theta, y, log_prices) {
+  # Predicted Value
+  y_hat <- theta[1] + theta[2] * log_prices
+  
+  # Probability Density of actual y
+  # We return negative sum because optim minimizes
+  sum_prob_y <- sum(dnorm(y, log = TRUE, mean = y_hat, sd = theta[3]))
+  return(-sum_prob_y)
+}
+```
+
+## B. Optimization (Univariate)
+
+We use L-BFGS-B to find the parameters that maximize likelihood. We use benchmark values to initialize the optimizer to avoid local minima.
+
+```{r optim}
+# Benchmark Model for Initial Guesses
+benchmark_model <- lm(logmove ~ log_price, tropicana)
+theta_start_simple <- c(coef(benchmark_model)[1], coef(benchmark_model)[2], 1)
+
+# Run Optimization
+mle_results_simple <- optim(par = theta_start_simple, 
+                            fn = nll_gaussian_simple, 
+                            y = tropicana$logmove, 
+                            log_prices = tropicana$log_price,
+                            method = "L-BFGS-B",
+                            lower = c(-Inf, -Inf, 0.0001), # Sigma must be > 0
+                            control = list(reltol = 1e-12, maxit = 10000))
+
+# Result
+print(mle_results_simple$par)
+```
+
+## C. Standard Errors (Fisher Information)
+
+We validate statistical significance by calculating Standard Errors using the Hessian Matrix.
+
+```{r fisher}
+# Calculate Exact Hessian
+hessian_mat <- hessian(func = nll_gaussian_simple, 
+                       x = mle_results_simple$par, 
+                       y = tropicana$logmove, 
+                       log_prices = tropicana$log_price)
+
+# Invert to get Covariance Matrix and Standard Errors
+fisher_info <- solve(hessian_mat)
+std_errors <- sqrt(diag(fisher_info))
+
+# Report
+results_table_simple <- data.frame(
+  Parameter = c("Intercept", "Price_Elasticity", "Sigma"),
+  Estimate = mle_results_simple$par,
+  Std_Error = std_errors
+)
+knitr::kable(results_table_simple, caption = "Univariate MLE Results")
+```
+
+## D. Initial Pricing Calculation
+
+Based on this simple model, what would the optimal price be?
+```{r initial_price}
+# Inputs
+marg_cost <- 0.04
+beta_simple <- mle_results_simple$par[2]
+
+# Optimal Price Formula (Univariate)
+opt_price_simple <- marg_cost * (beta_simple / (1 + beta_simple))
+
+cat(sprintf("Univariate Elasticity: %.3f\n", beta_simple))
+cat(sprintf("Initial Optimal Price: $%.3f\n", opt_price_simple))
+```
+**Initial Finding:** The univariate model suggests an elasticity of -2.71. Based on this, the initial Optimal Price is calculated as $0.063.
+
+# Phase 2: The Multivariate Upgrade
+
+We suspect Omitted Variable Bias. If Minute Maid changes prices at the same time as Tropicana, our simple model might be attributing that behavior incorrectly to our own price.
+
+We upgrade the engine to:
+$$ln(Q)=β0+β1ln(P~own~)+β2ln(P~comp~)+ϵ$$
+
+## A. Cross-Elasticity Visualization
+
+Plotting Competitor Price vs. Our Sales shows a confusing flat/downward trend. This suggests multicollinearity (prices moving together), confirming the need for multivariate regression to isolate the effects.
+
+```{r cross_visual}
+ggplot(tropicana, aes(x = log_price_mm, y = logmove)) +
+  geom_point(alpha = 0.3, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "blue") +
+  labs(title = "Cross-Elasticity Raw Plot (Misleading)", 
+       x = "Log Price (Minute Maid)", y = "Log Quantity (Tropicana)") +
+  theme_minimal()
+```
+
+## B. Multivariate Log-Likelihood
+
+We add log_price_comp and a new parameter β2.
+
+```{r mult_mle}
+# Multivariate Negative Log-Likelihood Function
+nll_gaussian_multi <- function(theta, y, log_prices, log_price_comp) {
+  # Predicted Value (Now includes Competitor Price)
+  y_hat <- theta[1] + theta[2]*log_prices + theta[3]*log_price_comp
+  
+  # Probability Density
+  sum_prob_y <- sum(dnorm(y, log = TRUE, mean = y_hat, sd = theta[4]))
+  return(-sum_prob_y)
+}
+```
+
+## C. Optimization (Multivariate)
+
+```{r mult_optim}
+# Benchmark for starts
+benchmark_model_comp <- lm(logmove ~ log_price + log_price_mm, data = tropicana)
+theta_start_multi <- c(coef(benchmark_model_comp)[1], 
+                       coef(benchmark_model_comp)[2], 
+                       coef(benchmark_model_comp)[3], 
+                       1)
+
+# Run Optimization
+mult_mle_results <- optim(par = theta_start_multi, 
+                          fn = nll_gaussian_multi, 
+                          y = tropicana$logmove, 
+                          log_prices = tropicana$log_price,
+                          log_price_comp = tropicana$log_price_mm,
+                          method = "L-BFGS-B",
+                          lower = c(-Inf, -Inf, -Inf, 0.0001),
+                          control = list(reltol = 1e-12, maxit = 10000))
+
+# Final Parameters
+print(mult_mle_results$par)
+```
+
+# Key Insight: Omitted Variable Bias
+
+Comparing the models reveals the "Cushion Effect."
+
+```{r comparison}
+comparison <- data.frame(
+  Model = c("Univariate (Simple)", "Multivariate (Corrected)"),
+  Own_Elasticity = c(round(mle_results_simple$par[2], 3), round(mult_mle_results$par[2], 3))
+)
+knitr::kable(comparison)
+```
+
+**Interpretation:**
+
+- Simple Model (-2.71): Underestimated price sensitivity. It gave Tropicana credit for retaining customers when, in reality, Minute Maid was effectively "saving" Tropicana by also having high prices during those weeks.
+- Multivariate Model (-2.83): Controlling for competition reveals that Tropicana customers are more sensitive than previously thought.
+- Cross-Elasticity (+0.49): Confirms Minute Maid is a substitute.
+
+# Final Recommendation & Business Impact
+**The Corrected Optimal Price**
+
+Using the corrected elasticity (β=−2.83), we solve for the profit-maximizing price:
+
+$$P^{*} = \text{Cost} \times \frac{\beta}{1 + \beta}$$
+
+
+```{r business_impact}
+# Inputs
+marg_cost <- 0.04
+beta_final <- mult_mle_results$par[2]
+
+# Optimal Price Calculation
+opt_price_mult <- marg_cost * (beta_final / (1 + beta_final))
+curr_price <- mean(tropicana$price1)
+
+# Report Prices
+cat(sprintf("Current Avg Price:   $%.3f\n", curr_price))
+cat(sprintf("Final Optimal Price: $%.3f\n", opt_price_mult))
+```
+
+## Projected Change in Quantity Sold & Profit
+
+```{r deltas}
+# 1. Extract All Parameters
+b0 <- mult_mle_results$par[1]  # Intercept
+b1 <- mult_mle_results$par[2]  # Own Elasticity
+b2 <- mult_mle_results$par[3]  # Cross-Elasticity (Competitor)
+cost <- 0.04
+
+# 2. Define Prices
+p_own_current <- mean(tropicana$price1)
+p_own_optimal <- opt_price_mult       # From previous chunk
+p_comp_avg    <- mean(tropicana$price5) # Hold Competitor Price Constant at Avg
+
+# 3. Predict Quantity (Multivariate Prediction)
+# Q = exp(b0) * (P_own)^b1 * (P_comp)^b2
+q_current <- exp(b0) * (p_own_current^b1) * (p_comp_avg^b2)
+q_optimal <- exp(b0) * (p_own_optimal^b1) * (p_comp_avg^b2)
+
+# 4. Calculate Profit
+profit_current <- (p_own_current - cost) * q_current
+profit_optimal <- (p_own_optimal - cost) * q_optimal
+
+# Create a summary table for the final report
+impact_table <- data.frame(
+  Metric = c("Price ($/oz)", "Volume (Units)", "Weekly Profit"),
+  Current = c(p_own_current, q_current, profit_current),
+  Optimal = c(p_own_optimal, q_optimal, profit_optimal)
+)
+
+# Calculate % Change column
+impact_table$Change_Pct <- (impact_table$Optimal - impact_table$Current) / impact_table$Current * 100
+
+# Formatting for display
+impact_table$Current <- round(impact_table$Current, 2)
+impact_table$Optimal <- round(impact_table$Optimal, 2)
+impact_table$Change_Pct <- paste0(round(impact_table$Change_Pct, 1), "%")
+
+# Print nice table
+knitr::kable(impact_table, caption = "Projected Business Impact (Weekly Per Store)")
+```
+
+# Conclusion
+
+The analysis recommends increasing the price to $0.062. While this strategy accepts a lower sales volume (due to high elasticity), the substantial increase in margin per unit drives a projected 81% increase in weekly profitability.
